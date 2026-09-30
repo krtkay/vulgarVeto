@@ -11,6 +11,18 @@ which makes it cheap and easy to deploy on Streamlit Community Cloud.
 
 ---
 
+## 📸 Screenshots
+
+**Detection, censoring & explainability — all in one view**
+
+![Analysis results](docs/screenshots/02-results.png)
+
+| Landing (controls live in the sidebar) | Optional audio mode |
+|:---:|:---:|
+| ![Landing](docs/screenshots/01-landing.png) | ![Audio mode](docs/screenshots/04-audio.png) |
+
+---
+
 ## ✨ Features
 
 | | |
@@ -25,13 +37,7 @@ which makes it cheap and easy to deploy on Streamlit Community Cloud.
 
 ## 🧠 How the NLP works
 
-```
-text ──▶ span-aware tokenizer ──▶ per-token matching ──▶ censor in place
-                                     │
-        exact ─▶ normalized ─▶ masked-vowel ─▶ fuzzy   (gated by sensitivity)
-        + phrase pass for multi-word entries
-        + severity tagging (mild / moderate / severe)
-```
+![VulgarVeto processing pipeline](docs/pipeline.svg)
 
 - **Normalization** — Unicode folding, accent stripping, case folding, leetspeak
   substitution, separator removal, repeated-letter collapse.
@@ -82,6 +88,8 @@ profanity_filter.py          The NLP engine (pure standard library)
 audio_utils.py               Optional WAV transcription + TTS (lazy imports)
 en.txt                       Profanity lexicon (~1k entries)
 tests/test_profanity_filter.py   Unit tests (incl. Scunthorpe cases)
+docs/pipeline.svg            Architecture / pipeline diagram
+docs/screenshots/            App screenshots (used in this README)
 Amplitude_Envelope.ipynb     Research notebook (spectrograms / amplitude envelopes)
 Audio-Files/                 Sample recordings
 requirements.txt             Lightweight deps

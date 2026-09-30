@@ -21,7 +21,12 @@ from profanity_filter import ProfanityFilter, Sensitivity, Severity
 # Page + theme
 # ---------------------------------------------------------------------------
 
-st.set_page_config(page_title="VulgarVeto", page_icon="🚫", layout="wide")
+st.set_page_config(
+    page_title="VulgarVeto",
+    page_icon="🚫",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
 
 st.markdown(
     """
