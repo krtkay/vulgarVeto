@@ -2,6 +2,10 @@
 
 > Keep it clean, keep it mean — bleep that obscene!
 
+[![Open in Streamlit](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://vulgarveto-4ukrn2kibpcfsmwiysqffa.streamlit.app/)
+
+**▶️ Live app — <https://vulgarveto-4ukrn2kibpcfsmwiysqffa.streamlit.app/>**
+
 VulgarVeto is a compact **NLP profanity detector and censor**. Paste some text (or
 upload a WAV recording) and it finds offensive language, explains *why* each word
 was flagged, and rewrites it in the censor style you choose.
@@ -67,6 +71,10 @@ pytest -q
 ```
 
 ## ☁️ Deploy to Streamlit Community Cloud
+
+> This repo is already deployed → **<https://vulgarveto-4ukrn2kibpcfsmwiysqffa.streamlit.app/>**
+
+To deploy your own copy:
 
 1. Push this folder to a **public GitHub repo**.
 2. Go to [share.streamlit.io](https://share.streamlit.io) and sign in with GitHub.
