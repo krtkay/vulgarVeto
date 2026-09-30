@@ -1,400 +1,322 @@
-import streamlit as st
-import speech_recognition as sr
-from gtts import gTTS
-from pydub import AudioSegment
-from tempfile import NamedTemporaryFile
-import io
+"""
+VulgarVeto - an NLP profanity detector & censor.
+
+A Streamlit front-end over :mod:`profanity_filter`. The primary mode is **text**
+(pure-Python NLP, works anywhere), with an optional **audio** mode that
+transcribes a WAV, censors the transcript, and can re-synthesize clean speech.
+
+Run locally:  ``streamlit run app.py``
+"""
+
+from __future__ import annotations
+
 import random
-import time
 
-def transcribe_chunk(audio_chunk):
-    recognizer = sr.Recognizer()
-    with sr.AudioFile(audio_chunk) as source:
-        audio_data = recognizer.record(source)
-    try:
-        text = recognizer.recognize_google(audio_data)
-        return text
-    except sr.UnknownValueError:
-        return "Could not understand audio"
-    except sr.RequestError as e:
-        return "Could not request results; {0}".format(e)
+import streamlit as st
 
-def split_audio(audio_file, chunk_duration_ms):
-    audio = AudioSegment.from_wav(audio_file)
-    chunk_count = len(audio) // chunk_duration_ms + 1
-    chunks = []
-    for i in range(chunk_count):
-        start_time = i * chunk_duration_ms
-        end_time = (i + 1) * chunk_duration_ms
-        if end_time > len(audio):
-            end_time = len(audio)
-        chunk = audio[start_time:end_time]
-        with NamedTemporaryFile(delete=False, suffix=".wav") as temp_file:
-            temp_filename = temp_file.name
-            chunk.export(temp_filename, format="wav")
-            chunks.append(temp_filename)
-    return chunks
+import audio_utils
+from profanity_filter import ProfanityFilter, Sensitivity, Severity
 
-def transcribe_audio(audio_file, chunk_duration_ms):
-    audio_chunks = split_audio(audio_file, chunk_duration_ms)
-    transcriptions = []
-    for chunk in audio_chunks:
-        transcription = transcribe_chunk(chunk)
-        transcriptions.append(transcription)
+# ---------------------------------------------------------------------------
+# Page + theme
+# ---------------------------------------------------------------------------
 
-    full_text = ' '.join(transcriptions)
-    return full_text
+st.set_page_config(page_title="VulgarVeto", page_icon="🚫", layout="wide")
 
-def filter_bad_words(text, bad_words, censor_type):
-    words = text.split()
-    filtered_words = []
-    
-    beep_options = ["BEEP", "*bleep*", "$#@%!", "****", "[censored]", "[redacted]", "!@#$"]
-    
-    for word in words:
-        word_lower = word.lower()
-        # Check if the word contains a bad word
-        if any(bad_word in word_lower for bad_word in bad_words):
-            if censor_type == "Random":
-                replacement = random.choice(beep_options)
-            elif censor_type == "Dolphin":
-                replacement = "🐬" * (len(word) // 2 + 1)
-            elif censor_type == "Symbols":
-                symbols = ["#", "@", "$", "%", "&", "*", "!"]
-                replacement = ''.join(random.choice(symbols) for _ in range(len(word)))
-            else:  # Default beep
-                replacement = "BEEP"
-            filtered_words.append(replacement)
-        else:
-            filtered_words.append(word)
-            
-    filtered_text = ' '.join(filtered_words)
-    return filtered_text
+st.markdown(
+    """
+    <style>
+      .vv-title { font-size: 3rem; font-weight: 800; text-align:center;
+                  background: linear-gradient(90deg,#f2711c,#db2828);
+                  -webkit-background-clip:text; -webkit-text-fill-color:transparent;
+                  margin-bottom:0; }
+      .vv-tag   { text-align:center; color:#888; margin-top:0; font-size:1.05rem; }
+      .vv-box   { background:rgba(127,127,127,.08); border:1px solid rgba(127,127,127,.2);
+                  border-radius:12px; padding:1rem 1.2rem; }
+      mark { line-height:1.9; }
+      .vv-meter-track { width:100%; height:26px; background:rgba(127,127,127,.18);
+                        border-radius:13px; overflow:hidden; }
+      .vv-meter-fill  { height:100%; color:#fff; font-weight:700; text-align:center;
+                        line-height:26px; border-radius:13px; transition:width .4s; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
-def text_to_speech(text, language='en'):
-    tts = gTTS(text=text, lang=language, slow=False)
-    audio_file = io.BytesIO()
-    tts.write_to_fp(audio_file)
-    audio_file.seek(0)
-    return audio_file
 
-# Custom CSS for a fun and unique interface
-def set_custom_theme():
+@st.cache_resource(show_spinner=False)
+def get_filter() -> ProfanityFilter:
+    """Load the lexicon once per server process."""
+    return ProfanityFilter()
+
+
+PF = get_filter()
+
+SENSITIVITY_HELP = {
+    "Low - exact words only": Sensitivity.LOW,
+    "Medium - + leetspeak & masking": Sensitivity.MEDIUM,
+    "High - + fuzzy / typos": Sensitivity.HIGH,
+}
+SEVERITY_COLORS = {"mild": "#f4b942", "moderate": "#f2711c", "severe": "#db2828"}
+CENSOR_STYLES = ["Beep", "Mask", "Symbols", "Dolphin", "Random", "Remove"]
+
+SAMPLE_TEXT = (
+    "Honestly, this class analysis was a classic. But then some dumb@ss "
+    "started yelling 'what the hell is this sh1t' and f*cking lost it. "
+    "Cassandra from Scunthorpe stayed cool though."
+)
+
+FUN_FACTS = [
+    "Whole-word matching fixes the 'Scunthorpe problem' - clean words that merely contain a rude substring.",
+    "Studies suggest swearing can measurably increase pain tolerance.",
+    "Leetspeak ('sh1t', 'a$$') is normalized back to letters before matching.",
+    "The censorship 'beep' dates to 1950s radio and TV broadcasting.",
+    "This app is fully offline for text - no ML model, no GPU, no API key.",
+]
+
+
+# ---------------------------------------------------------------------------
+# Sidebar controls (shared by text & audio)
+# ---------------------------------------------------------------------------
+
+def sidebar_config():
+    st.sidebar.header("⚙️ Controls")
+
+    style = st.sidebar.selectbox("Censor style", CENSOR_STYLES, index=0)
+
+    sens_label = st.sidebar.radio(
+        "Detection sensitivity",
+        list(SENSITIVITY_HELP.keys()),
+        index=1,
+        help="Higher = catches more obfuscation, but slightly more false positives.",
+    )
+    sensitivity = SENSITIVITY_HELP[sens_label]
+
+    st.sidebar.markdown("**Censor which severities?**")
+    sev = []
+    if st.sidebar.checkbox("Mild", value=True):
+        sev.append(Severity.MILD)
+    if st.sidebar.checkbox("Moderate", value=True):
+        sev.append(Severity.MODERATE)
+    if st.sidebar.checkbox("Severe", value=True):
+        sev.append(Severity.SEVERE)
+
+    st.sidebar.divider()
+    st.sidebar.markdown("### 🎓 Did you know?")
+    st.sidebar.info(random.choice(FUN_FACTS))
+
+    return {"style": style, "sensitivity": sensitivity, "severities": sev}
+
+
+# ---------------------------------------------------------------------------
+# Shared result renderer
+# ---------------------------------------------------------------------------
+
+def render_analysis(result, style: str):
+    if result.token_count == 0:
+        st.info("Nothing to analyze yet.")
+        return
+
+    # -- metrics ---------------------------------------------------------
+    breakdown = result.severity_breakdown()
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Tokens", result.token_count)
+    c2.metric("Flagged", result.flagged_count)
+    c3.metric("Profanity rate", f"{result.profanity_rate:.1f}%")
+    c4.metric("Unique words", len(result.unique_words))
+
+    # -- profanity meter -------------------------------------------------
+    rate = result.profanity_rate
+    fill = "#21ba45" if rate < 10 else "#f2711c" if rate < 30 else "#db2828"
     st.markdown(
-        """
-        <style>
-        .main {
-            background: linear-gradient(to right, #1e3c72, #2a5298);
-            color: white;
-        }
-        .stApp {
-            max-width: 1000px;
-            margin: 0 auto;
-        }
-        h1 {
-            color: #FFD700;
-            text-shadow: 2px 2px 4px #000000;
-            font-size: 3.5em;
-            text-align: center;
-            animation: pulse 2s infinite;
-        }
-        @keyframes pulse {
-            0% {
-                transform: scale(1);
-            }
-            50% {
-                transform: scale(1.05);
-            }
-            100% {
-                transform: scale(1);
-            }
-        }
-        .upload-box {
-            border: 3px dashed #FFD700;
-            border-radius: 20px;
-            padding: 30px;
-            text-align: center;
-            margin: 20px 0;
-            background-color: rgba(0, 0, 0, 0.3);
-        }
-        .censored-badge {
-            display: inline-block;
-            background-color: #FF4500;
-            color: white;
-            padding: 5px 10px;
-            border-radius: 15px;
-            font-weight: bold;
-            margin: 5px;
-        }
-        .stButton button {
-            background-color: #FF4500;
-            color: white;
-            font-weight: bold;
-            padding: 10px 25px;
-            border-radius: 10px;
-            border: none;
-            transition: all 0.3s;
-        }
-        .stButton button:hover {
-            background-color: #FFD700;
-            color: black;
-            transform: scale(1.05);
-        }
-        .result-box {
-            background-color: rgba(0, 0, 0, 0.5);
-            border-radius: 15px;
-            padding: 20px;
-            margin: 20px 0;
-        }
-        </style>
+        f"""
+        <div class="vv-meter-track">
+          <div class="vv-meter-fill" style="width:{max(min(rate,100),8):.0f}%;background:{fill};">
+            {rate:.1f}%
+          </div>
+        </div>
         """,
-        unsafe_allow_html=True
+        unsafe_allow_html=True,
     )
 
-def display_fun_facts():
-    fun_facts = [
-        "The average person swears about 80 times per day.",
-        "Studies show that swearing can actually increase pain tolerance.",
-        "The censorship sound 'BEEP' dates back to the early days of radio and TV broadcasting.",
-        "In medieval times, swear words were often related to religious blasphemy.",
-        "Some languages have more than twice as many swear words as others.",
-        "The first recorded use of censorship beeps on television was in the 1950s.",
-        "Different cultures have wildly different taboo words and phrases.",
-        "Swearing in a foreign language activates different parts of the brain than swearing in your native tongue.",
-        "The dolphin sound is sometimes used as a censor because dolphins make high-pitched sounds similar to TV beeps.",
-        "Some streaming platforms employ AI to detect and censor profanity in real-time."
-    ]
-    
-    st.sidebar.markdown("### 🎓 **Did You Know?**")
-    st.sidebar.info(random.choice(fun_facts))
+    if result.clean:
+        st.success("Clean! No profanity detected. 👏")
+        return
+    if rate > 30:
+        st.warning("Whoa there, sailor - that's some colorful language! 🚢")
+    elif rate > 10:
+        st.info("A little soap for that mouth wouldn't hurt. 🧼")
+
+    st.write("")
+
+    # -- original (highlighted) vs censored ------------------------------
+    left, right = st.columns(2)
+    with left:
+        st.markdown("#### Original (flagged)")
+        st.markdown(
+            f'<div class="vv-box">{PF.highlight_html(result)}</div>',
+            unsafe_allow_html=True,
+        )
+    with right:
+        st.markdown("#### Censored")
+        st.markdown(f'<div class="vv-box">{result.censored}</div>', unsafe_allow_html=True)
+        st.download_button(
+            "⬇️ Download censored text",
+            result.censored,
+            file_name="censored.txt",
+            mime="text/plain",
+            use_container_width=True,
+        )
+
+    # -- severity chips --------------------------------------------------
+    chips = "".join(
+        f'<span style="background:{SEVERE_COLOR(sev)};color:#fff;border-radius:12px;'
+        f'padding:2px 10px;margin:2px;display:inline-block;">{sev}: {n}</span>'
+        for sev, n in breakdown.items() if n
+    )
+    st.markdown(f"**Severity mix:** {chips or '—'}", unsafe_allow_html=True)
+
+    # -- explainable detection table ------------------------------------
+    with st.expander(f"🔎 Why these {result.flagged_count} were flagged", expanded=True):
+        rows = [
+            {
+                "As written": m.original,
+                "Matched entry": m.canonical,
+                "Severity": m.severity.label,
+                "How": m.method,
+            }
+            for m in result.matches
+        ]
+        st.dataframe(rows, use_container_width=True, hide_index=True)
+        st.caption(
+            "How: exact = literal word · normalized = leetspeak/spacing undone · "
+            "masked = blanked vowel (f*ck) · fuzzy = close typo · phrase = multi-word."
+        )
+
+
+def SEVERE_COLOR(sev: str) -> str:
+    return SEVERITY_COLORS.get(sev, "#888")
+
+
+# ---------------------------------------------------------------------------
+# Tabs
+# ---------------------------------------------------------------------------
+
+def text_tab(cfg):
+    st.markdown("#### Paste or type some text")
+    text = st.text_area("Input text", value=SAMPLE_TEXT, height=160, label_visibility="collapsed")
+    if st.button("🚫 Analyze & Censor", type="primary"):
+        if not text.strip():
+            st.info("Type something first.")
+            return
+        result = PF.analyze(
+            text,
+            sensitivity=cfg["sensitivity"],
+            severities=cfg["severities"] or None,
+            style=cfg["style"].lower(),
+        )
+        render_analysis(result, cfg["style"])
+
+
+def audio_tab(cfg):
+    if not audio_utils.speech_to_text_available():
+        st.warning("Audio transcription needs `SpeechRecognition` (see requirements.txt).")
+        return
+
+    st.markdown("#### Upload a WAV recording")
+    st.caption("Uncompressed PCM WAV (mono/stereo). Transcription uses an online service.")
+    uploaded = st.file_uploader("WAV file", type=["wav"], label_visibility="collapsed")
+    if not uploaded:
+        return
+
+    st.audio(uploaded, format="audio/wav")
+    make_speech = st.checkbox("Also generate clean speech (text-to-speech)", value=False)
+    chunk = st.slider("Transcription chunk size (seconds)", 5, 30, 15, 5)
+
+    if not st.button("🎤 Transcribe & Clean", type="primary"):
+        return
+
+    audio_bytes = uploaded.getvalue()
+    bar = st.progress(0.0, text="Transcribing…")
+    try:
+        transcript = audio_utils.transcribe_wav(
+            audio_bytes, chunk_seconds=chunk, progress=lambda p: bar.progress(p, text="Transcribing…")
+        )
+    except RuntimeError as exc:
+        bar.empty()
+        st.error(str(exc))
+        return
+    bar.empty()
+
+    if not transcript:
+        st.info("No speech was recognized in that file.")
+        return
+
+    result = PF.analyze(
+        transcript,
+        sensitivity=cfg["sensitivity"],
+        severities=cfg["severities"] or None,
+        style=cfg["style"].lower(),
+    )
+    render_analysis(result, cfg["style"])
+
+    if make_speech and audio_utils.tts_available():
+        with st.spinner("Synthesizing clean audio…"):
+            try:
+                clean_audio = audio_utils.text_to_speech(result.censored)
+                st.markdown("#### 🔊 Clean audio")
+                st.caption("Note: this is re-synthesized speech, not the original voice.")
+                st.audio(clean_audio, format="audio/mp3")
+            except RuntimeError as exc:
+                st.error(str(exc))
+
+
+def about_tab():
+    st.markdown(
+        """
+### What VulgarVeto is
+A compact **NLP profanity filter**: it detects offensive words in text (or an
+audio transcript) and rewrites them in your chosen censor style.
+
+### The NLP under the hood
+- **Span-aware tokenization** - censor in place, keep original casing & punctuation.
+- **Whole-word & phrase matching** - fixes the *Scunthorpe problem*: `class`,
+  `analysis`, `cocktail`, `assassin` are **not** flagged.
+- **De-obfuscation** - leetspeak and symbol masking are normalized before matching
+  (`sh1t`→shit, `a$$`→ass, `f.u.c.k`→fuck, `fuuuck`→fuck, `f*ck`→fuck).
+- **Multi-strategy matching** - exact → normalized → masked-vowel → fuzzy, chosen
+  by the **sensitivity** setting (recall vs. precision).
+- **Severity tiers** - mild / moderate / severe, so you choose what to censor.
+- **Explainability** - every hit reports *how* it matched.
+
+### Honest limitations
+- Audio mode **re-synthesizes** the cleaned transcript with TTS; it does not bleep
+  the original recording, so the speaker's voice and timing are not preserved.
+- Transcription and TTS call online services and need internet.
+- The lexicon (`en.txt`, ~1k entries) drives coverage; severity labels are heuristic.
+""",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
 
 def main():
-    set_custom_theme()
-    
-    # Load bad words
-    bad_words_file_path = "en.txt"
-    try:
-        with open(bad_words_file_path, 'r') as file:
-            bad_words = file.read().splitlines()
-    except FileNotFoundError:
-        # Fallback list of bad words in case the file isn't found
-        bad_words = ["damn", "hell", "shit", "fuck", "ass", "bastard", "crap"]
-    
-    # ASCII Art Title
-    st.markdown("""
-    <div style="text-align: center; margin-bottom: 30px;">
-        <h1>🔊 VulgarVeto 🚫</h1>
-        <p style="font-size: 1.2em; color: #FFD700;">
-            Keep it clean, keep it mean, bleep that obscene!
-        </p>
-    </div>
-    """, unsafe_allow_html=True)
-    
-    # Fun audio meter animation
-    st.markdown("""
-    <div style="display: flex; justify-content: center; margin: 20px 0;">
-        <div style="width: 10px; height: 20px; background-color: #FFD700; margin: 0 2px; animation: equalize 1s infinite;"></div>
-        <div style="width: 10px; height: 40px; background-color: #FFD700; margin: 0 2px; animation: equalize 0.8s infinite;"></div>
-        <div style="width: 10px; height: 15px; background-color: #FFD700; margin: 0 2px; animation: equalize 1.2s infinite;"></div>
-        <div style="width: 10px; height: 30px; background-color: #FFD700; margin: 0 2px; animation: equalize 0.6s infinite;"></div>
-        <div style="width: 10px; height: 25px; background-color: #FFD700; margin: 0 2px; animation: equalize 1.3s infinite;"></div>
-        <div style="width: 10px; height: 45px; background-color: #FFD700; margin: 0 2px; animation: equalize 0.7s infinite;"></div>
-        <div style="width: 10px; height: 20px; background-color: #FFD700; margin: 0 2px; animation: equalize 1.1s infinite;"></div>
-    </div>
-    <style>
-    @keyframes equalize {
-        0% { transform: scaleY(1); }
-        50% { transform: scaleY(0.6); }
-        100% { transform: scaleY(1); }
-    }
-    </style>
-    """, unsafe_allow_html=True)
-    
-    # Add tabs for different features
-    tabs = st.tabs(["🎤 Audio Filter", "ℹ️ About", "⚙️ Settings"])
-    
-    with tabs[0]:
-        st.markdown('<div class="upload-box">', unsafe_allow_html=True)
-        uploaded_file = st.file_uploader("**Drop your potentially vulgar audio here**", type=["wav"])
-        st.markdown('</div>', unsafe_allow_html=True)
-        
-        if uploaded_file:
-            st.audio(uploaded_file, format='audio/wav')
-            
-            col1, col2 = st.columns(2)
-            with col1:
-                st.markdown("### Censorship Style")
-                censor_type = st.selectbox(
-                    "Choose how to censor bad words:",
-                    ["Classic BEEP", "Random", "Dolphin", "Symbols"]
-                )
-            with col2:
-                st.markdown("### Processing Method")
-                chunk_duration = st.slider("Chunk duration (ms)", 5000, 30000, 15000, 5000)
-            
-            with st.spinner("🔍 Running voice recognition..."):
-                if st.button("🚫 Clean My Audio!"):
-                    # Add progress bar for visual feedback
-                    progress_bar = st.progress(0)
-                    status_text = st.empty()
-                    
-                    # Simulate processing steps for better user experience
-                    status_text.text("Analyzing audio...")
-                    progress_bar.progress(10)
-                    time.sleep(0.5)
-                    
-                    status_text.text("Transcribing content...")
-                    progress_bar.progress(30)
-                    transcription = transcribe_audio(uploaded_file, chunk_duration)
-                    
-                    status_text.text("Detecting naughty words...")
-                    progress_bar.progress(60)
-                    time.sleep(0.5)
-                    
-                    status_text.text("Applying censorship...")
-                    progress_bar.progress(80)
-                    filtered_text = filter_bad_words(transcription, bad_words, censor_type)
-                    
-                    status_text.text("Generating clean audio...")
-                    progress_bar.progress(90)
-                    filtered_audio = text_to_speech(filtered_text)
-                    
-                    progress_bar.progress(100)
-                    status_text.text("Complete! 🎉")
-                    time.sleep(1)
-                    progress_bar.empty()
-                    status_text.empty()
-                    
-                    # Calculate profanity stats
-                    total_words = len(transcription.split())
-                    bad_word_count = sum(1 for word in transcription.lower().split() 
-                                         if any(bad_word in word for bad_word in bad_words))
-                    profanity_percentage = (bad_word_count / total_words) * 100 if total_words > 0 else 0
-                    
-                    # Display results
-                    st.markdown('<div class="result-box">', unsafe_allow_html=True)
-                    
-                    # Add profanity meter
-                    st.markdown(f"""
-                    ### Profanity Meter 🌡️
-                    <div style="width: 100%; background-color: #e0e0e0; border-radius: 10px; height: 30px; margin: 10px 0;">
-                        <div style="width: {min(profanity_percentage, 100)}%; background: linear-gradient(to right, green, {'yellow' if profanity_percentage < 50 else 'red'}); 
-                        height: 100%; border-radius: 10px; text-align: center; line-height: 30px; color: white; font-weight: bold;">
-                            {profanity_percentage:.1f}%
-                        </div>
-                    </div>
-                    """, unsafe_allow_html=True)
-                    
-                    if profanity_percentage > 50:
-                        st.warning("Whoa there, sailor! That's some colorful language you've got! 🚢")
-                    elif profanity_percentage > 20:
-                        st.info("Hmm, you could use a little soap in that mouth! 🧼")
-                    else:
-                        st.success("Pretty clean! Just a few touch-ups needed. ✨")
-                    
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        st.markdown("### Original Transcription")
-                        st.write(transcription)
-                    
-                    with col2:
-                        st.markdown("### Censored Version")
-                        st.write(filtered_text)
-                    
-                    st.markdown("### Cleaned Audio")
-                    st.audio(filtered_audio, format='audio/wav')
-                    
-                    st.markdown("</div>", unsafe_allow_html=True)
-                    
-                    # Show some censored words tags
-                    st.markdown("### Detected Bad Words:")
-                    if bad_word_count > 0:
-                        detected_words = []
-                        for word in transcription.lower().split():
-                            for bad_word in bad_words:
-                                if bad_word in word and bad_word not in detected_words:
-                                    detected_words.append(bad_word)
-                        
-                        if detected_words:
-                            st.markdown('<div style="display: flex; flex-wrap: wrap;">', unsafe_allow_html=True)
-                            for word in detected_words[:10]:  # Show max 10 words
-                                st.markdown(f'<span class="censored-badge">{word[0]}{"*" * (len(word)-1)}</span>', unsafe_allow_html=True)
-                            st.markdown('</div>', unsafe_allow_html=True)
-                    else:
-                        st.success("No bad words detected! 👏")
-    
-    with tabs[1]:
-        st.markdown("""
-        ## About VulgarVeto
-        
-        **VulgarVeto** is your solution to clean up foul-mouthed audio! Whether you're preparing content for:
-        
-        - 👪 Family-friendly platforms
-        - 🏫 Educational settings
-        - 📱 Social media that restricts profanity
-        - 🎭 Comedy that needs strategic bleeps
-        
-        Our advanced algorithm detects and censors inappropriate language while preserving the meaning and flow of the original audio.
-        
-        ### How It Works
-        
-        1. 🎤 **Upload** - Provide an audio file in WAV format
-        2. 🧠 **Process** - Our AI transcribes the audio and identifies problematic words
-        3. 🚫 **Censor** - We replace bad words with your chosen censorship style
-        4. 🔊 **Output** - Get a clean version ready for your audience!
-        
-        ### Censorship Styles
-        
-        - **Classic BEEP** - The traditional censorship sound
-        - **Random** - Various unexpected replacements
-        - **Dolphin** - Marine-themed censorship (🐬🐬🐬)
-        - **Symbols** - Replaces words with symbols (#@$%!)
-        """)
-    
-    with tabs[2]:
-        st.markdown("## Settings")
-        st.write("Customize your VulgarVeto experience:")
-        
-        # Voice selection for TTS (for demonstration - actual functionality would require additional code)
-        st.selectbox("TTS Voice", ["Standard Female", "Standard Male", "Robot", "Posh British", "Valley Girl"], index=0)
-        
-        # Sensitivity slider
-        sensitivity = st.slider("Profanity Detection Sensitivity", 1, 10, 5)
-        st.caption(f"Current setting: {'Low' if sensitivity < 4 else 'High' if sensitivity > 7 else 'Medium'} sensitivity")
-        
-        # Advanced options
-        with st.expander("Advanced Options"):
-            st.checkbox("Block mild profanity", value=True)
-            st.checkbox("Block moderate profanity", value=True)
-            st.checkbox("Block severe profanity", value=True)
-            st.checkbox("Use AI-enhanced detection", value=True)
-            st.checkbox("Keep original audio timing", value=False)
-    
-    # Sidebar content
-    st.sidebar.image("https://www.crazysocks.com/cdn/shop/articles/benefits-of-swearing_800x.png?v=1688849137", use_column_width=True)
-    display_fun_facts()
-    
-    # Add random quotes about censorship to the sidebar - FIXED QUOTE MARKS HERE
-    quotes = [
-        "\"Censorship is telling a man he can't have a steak just because a baby can't chew it.\" - Mark Twain",
-        "\"The first condition of progress is the removal of censorship.\" - George Bernard Shaw",
-        "\"Censorship reflects a society's lack of confidence in itself.\" - Potter Stewart",
-        "\"I don't see why someone should lose their life just so you can have a snack.\" - Captain Obvious",
-        "\"BEEP out of my way, I'm trying to BEEP make a point here!\" - Censored Comedian",
-        "\"The BEEP is always BEEP-er on the other side.\" - Anonymous",
-        "\"To BEEP, or not to BEEP, that is the BEEP question.\" - William ShakesBEEP"
-    ]
-    
-    st.sidebar.markdown("### 💭 **Quotable Quotes**")
-    st.sidebar.markdown(f"*{random.choice(quotes)}*")
-    
-    # Footer
-    st.markdown("""
-    <div style="text-align: center; margin-top: 50px; padding: 20px; background-color: rgba(0,0,0,0.5); border-radius: 10px;">
-        <p>Made with 🤐 by VulgarVeto Team</p>
-        <p style="font-size: 0.8em;">We believe in your right to be clean... and your right to be dirty, just not in public!</p>
-    </div>
-    """, unsafe_allow_html=True)
+    st.markdown('<div class="vv-title">🔊 VulgarVeto 🚫</div>', unsafe_allow_html=True)
+    st.markdown('<p class="vv-tag">Keep it clean, keep it mean — bleep that obscene!</p>',
+                unsafe_allow_html=True)
+    st.write("")
+
+    cfg = sidebar_config()
+    t_text, t_audio, t_about = st.tabs(["✍️ Text", "🎤 Audio", "ℹ️ About"])
+    with t_text:
+        text_tab(cfg)
+    with t_audio:
+        audio_tab(cfg)
+    with t_about:
+        about_tab()
+
 
 if __name__ == "__main__":
     main()

@@ -1,0 +1,11 @@
+[theme]
+base = "light"
+primaryColor = "#f2711c"
+font = "sans serif"
+
+[server]
+# Keep uploads modest so the free Community Cloud tier stays responsive.
+maxUploadSize = 30
+
+[browser]
+gatherUsageStats = false

@@ -1,0 +1,7 @@
+# Core app (text NLP mode) needs only Streamlit.
+streamlit>=1.32
+
+# Optional audio mode. Both are pure-Python wheels and pull in no system
+# packages: transcription reads WAV natively (no pydub/ffmpeg), gTTS makes MP3.
+SpeechRecognition>=3.10
+gTTS>=2.5

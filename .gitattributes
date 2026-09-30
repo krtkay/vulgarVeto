@@ -1,0 +1,7 @@
+# Normalize line endings: keep text/source as LF in the repo.
+* text=auto eol=lf
+
+# Treat these as binary (no EOL conversion, no diffs).
+*.wav binary
+*.mp3 binary
+*.ipynb -text
